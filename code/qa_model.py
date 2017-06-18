@@ -10,6 +10,8 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 from operator import mul
 from tensorflow.python.ops import variable_scope as vs
+from tensorflow.python.util import nest
+from tensorflow.python.ops.rnn_cell import _linear
 from utils.util import ConfusionMatrix, Progbar, minibatches, one_hot, minibatch, get_best_span
 
 from evaluate import exact_match_score, f1_score
@@ -125,7 +127,7 @@ class Attention(object):
         return tf.concat(2,[h, u_a, h_0_u_a, h_0_h_a])
 
     # this function is from https://github.com/allenai/bi-att-flow/tree/master/my/tensorflow
-    def get_logits(args, size, bias, bias_start=0.0, scope=None, mask=None, wd=0.0, input_keep_prob=1.0, is_train=None, func=None):
+    def get_logits(self, args, size, bias, bias_start=0.0, scope=None, mask=None, wd=0.0, input_keep_prob=1.0, is_train=None, func=None):
 
         def linear_logits(args, bias, bias_start=0.0, scope=None, mask=None, wd=0.0, input_keep_prob=1.0, is_train=None):
 
@@ -175,6 +177,7 @@ class Attention(object):
                                 wd=wd, input_keep_prob=input_keep_prob, is_train=is_train)
                 return logits
 
+        print(args)
         assert len(args) == 2
         new_arg = args[0] * args[1]
         return linear_logits([args[0], args[1], new_arg], bias, bias_start=bias_start, scope=scope, mask=mask, wd=wd, input_keep_prob=input_keep_prob,
@@ -351,6 +354,8 @@ class Decoder(object):
         pred2 = tf.matmul(pred2_1, W_se)+b_se
         return pred1, pred2
 
+MAX_QUESTION_LENGTH = 60
+MAX_CONTEXT_LENGTH = 766
 class QASystem(object):
     def __init__(self, pretrained_embeddings, config):
         """
@@ -367,11 +372,16 @@ class QASystem(object):
         self.config = config
 
         # ==== set up placeholder tokens ====
-        self.question_placeholder = tf.placeholder(dtype=tf.int32, name="q", shape=(None, None))
-        self.question_mask_placeholder = tf.placeholder(dtype=tf.bool, name="q_mask", shape=(None, None))
-        self.context_placeholder = tf.placeholder(dtype=tf.int32, name="c", shape=(None, None))
-        self.context_mask_placeholder = tf.placeholder(dtype=tf.bool, name="c_mask", shape=(None, None))
-        # self.answer_placeholders = tf.placeholder(dtype=tf.int32, name="a", shape=(None, config.answer_size))
+        # self.question_placeholder = tf.placeholder(dtype=tf.int32, name="q", shape=(None, None))
+        # self.question_mask_placeholder = tf.placeholder(dtype=tf.bool, name="q_mask", shape=(None, None))
+        # self.context_placeholder = tf.placeholder(dtype=tf.int32, name="c", shape=(None, None))
+        # self.context_mask_placeholder = tf.placeholder(dtype=tf.bool, name="c_mask", shape=(None, None))
+
+        self.question_placeholder = tf.placeholder(dtype=tf.int32, name="q", shape=(None, MAX_QUESTION_LENGTH))
+        self.question_mask_placeholder = tf.placeholder(dtype=tf.bool, name="q_mask", shape=(None, MAX_QUESTION_LENGTH))
+        self.context_placeholder = tf.placeholder(dtype=tf.int32, name="c", shape=(None, MAX_CONTEXT_LENGTH))
+        self.context_mask_placeholder = tf.placeholder(dtype=tf.bool, name="c_mask", shape=(None, MAX_CONTEXT_LENGTH))
+
         self.answer_start_placeholders = tf.placeholder(dtype=tf.int32, name="a_s", shape=(None,))
         self.answer_end_placeholders = tf.placeholder(dtype=tf.int32, name="a_e", shape=(None,))
         self.dropout_placeholder = tf.placeholder(dtype=tf.float32, name="dropout", shape=())
@@ -481,8 +491,10 @@ class QASystem(object):
 
     def create_feed_dict(self, question_batch, question_len_batch, context_batch, context_len_batch, JX=10, JQ=10, answer_batch=None, is_train = True):
         feed_dict = {}
-        JQ = np.max(question_len_batch)
-        JX = np.max(context_len_batch)
+        # JQ = np.max(question_len_batch)
+        # JX = np.max(context_len_batch)
+        JQ = MAX_QUESTION_LENGTH
+        JX = MAX_CONTEXT_LENGTH
         # print('This batch len: JX = %d, JQ = %d', JX, JQ)
         def add_paddings(sentence, max_length):
             mask = [True] * len(sentence)
@@ -507,6 +519,7 @@ class QASystem(object):
         question, question_mask = padding_batch(question_batch, JQ)
         context, context_mask = padding_batch(context_batch, JX)
 
+
         feed_dict[self.question_placeholder] = question
         feed_dict[self.question_mask_placeholder] = question_mask
         feed_dict[self.context_placeholder] = context
@@ -526,7 +539,7 @@ class QASystem(object):
 
         return feed_dict
 
-    def optimize(self, session, training_set):
+    def    optimize(self, session, training_set):
         """
         Takes in actual data to optimize your model
         This method is equivalent to a step() function
@@ -655,7 +668,7 @@ class QASystem(object):
 
         prog = Progbar(target=batch_num)
         avg_loss = 0
-        for i, batch in enumerate(minibatches(training_set, self.config.batch_size, window_batch = self.config.window_batch)):
+        for i, batch in enumerate(minibatches(training_set, self.config.batch_size, shuffle = False)):
             global_batch_num = batch_num * epoch_num + i
             _, summary, loss = self.optimize(session, batch)
             prog.update(i + 1, [("training loss", loss)])
@@ -680,6 +693,7 @@ class QASystem(object):
 
         training_set = dataset['training'] # [question, len(question), context, len(context), answer]
         validation_set = dataset['validation']
+
         f1_best = 0
         if self.config.tensorboard:
             train_writer_dir = self.config.log_dir + '/train/' # + datetime.datetime.now().strftime('%m-%d_%H-%M-%S')
